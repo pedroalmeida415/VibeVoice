@@ -976,7 +976,7 @@ class VibeVoiceForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """
         Extract audio embeddings using VibeVoice's acoustic/semantic tokenizers.
         
@@ -1161,21 +1161,20 @@ class VibeVoiceForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         """
         Forward pass for VibeVoice ASR model.
         
-        Handles embedding computation and language model forward pass.
-        Uses inputs_embeds if provided (from vLLM multimodal merge), 
-        otherwise computes embeddings from input_ids.
-        
+        In vLLM >= 0.18.0, ``embed_input_ids`` (provided by the
+        ``SupportsMultiModal`` protocol) is called *before* this method,
+        so ``inputs_embeds`` is always provided during prefill.
+
         Args:
             input_ids: Token IDs. May be None when inputs_embeds is provided.
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors for pipeline parallelism.
             inputs_embeds: Pre-computed embeddings (from multimodal merge or decode).
         """
-        # PRIORITY: Use inputs_embeds if provided (from vLLM multimodal merge or decode)
-        # Only compute from input_ids if inputs_embeds is not available
+        # In v0.18.0, vLLM calls embed_input_ids before forward(), so
+        # inputs_embeds should always be provided. Fallback for safety.
         if inputs_embeds is None and input_ids is not None:
-            # Compute embeddings from input_ids
-            inputs_embeds = self.get_input_embeddings()(input_ids)
+            inputs_embeds = self.get_language_model().embed_input_ids(input_ids)
         
         # If we have intermediate tensors (pipeline parallelism), don't use inputs_embeds
         if intermediate_tensors is not None:
