@@ -687,7 +687,6 @@ def _vibevoice_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         # These are our custom fields for VibeVoice
         "raw_audio": MultiModalFieldConfig.batched("audio"),
         "raw_audio_lengths": MultiModalFieldConfig.batched("audio"),
-        "salt": MultiModalFieldConfig.batched("audio"),
     }
     
     # Add optional Whisper features if present
@@ -769,12 +768,6 @@ class VibeVoiceMultiModalProcessor(BaseMultiModalProcessor[VibeVoiceProcessingIn
         result["raw_audio"] = stacked_audio
         # Convert lengths to tensor as well
         result["raw_audio_lengths"] = torch.tensor(audio_lengths, dtype=torch.long)
-        
-        # Add a random salt to ensure unique hash and bypass cache
-        import uuid
-        # Use a random integer for salt
-        salt_val = hash(str(uuid.uuid4())) % 100000
-        result["salt"] = torch.tensor([salt_val], dtype=torch.long).expand(len(raw_audio_list))
         
         return result
 
