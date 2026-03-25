@@ -1,17 +1,19 @@
 """
-VibeVoice vLLM Plugin Model - Native Multimodal Integration
+VibeVoice vLLM Plugin Model - Native Multimodal Integration (vLLM >= 0.18.0)
 
 This module implements the VibeVoice ASR model with full vLLM multimodal registry
 integration for speech-to-text inference.
+
+Requires: vLLM >= 0.18.0
 """
 
-from typing import List, Optional, Tuple, Union, Dict, Any, Iterable, Mapping, Sequence
+import base64
 import os
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-import base64
-
 
 # ============================================================================
 # Audio Loading: FFmpeg-based AudioMediaIO
@@ -19,13 +21,16 @@ import base64
 # VibeVoice uses FFmpeg for audio decoding to ensure consistent behavior
 # across different audio formats (MP3, WAV, FLAC, etc.).
 
-
-from vibevoice.processor.audio_utils import load_audio_use_ffmpeg, load_audio_bytes_use_ffmpeg, AudioNormalizer
+from vibevoice.processor.audio_utils import (
+    AudioNormalizer,
+    load_audio_bytes_use_ffmpeg,
+    load_audio_use_ffmpeg,
+)
 
 
 def _ffmpeg_load_bytes(data: bytes) -> tuple[np.ndarray, int]:
     """Load audio bytes using FFmpeg via stdin-pipe decoding.
-    
+
     Returns:
         Tuple of (audio_waveform, sample_rate). Sample rate is always 24000.
     """
@@ -34,9 +39,10 @@ def _ffmpeg_load_bytes(data: bytes) -> tuple[np.ndarray, int]:
     audio = normalizer(audio)
     return audio, sr
 
+
 def _ffmpeg_load_file(filepath) -> tuple[np.ndarray, int]:
     """Load audio file using FFmpeg.
-    
+
     Returns:
         Tuple of (audio_waveform, sample_rate). Sample rate is always 24000.
     """
@@ -45,90 +51,79 @@ def _ffmpeg_load_file(filepath) -> tuple[np.ndarray, int]:
     audio = normalizer(audio)
     return audio, sr
 
-# Register FFmpeg-based audio loader
-try:
-    # Try new location (vLLM >= 0.6.x)
-    from vllm.multimodal.media.audio import AudioMediaIO as _OriginalAudioMediaIO
-except ImportError:
-    # Fall back to old location (vLLM < 0.6.x)
-    import vllm.multimodal.audio as _vllm_audio_module
-    _OriginalAudioMediaIO = _vllm_audio_module.AudioMediaIO
+
+# Patch vLLM's AudioMediaIO to use FFmpeg (vLLM >= 0.18.0 location)
+from vllm.multimodal.media.audio import AudioMediaIO as _OriginalAudioMediaIO
+
 
 class _PatchedAudioMediaIO(_OriginalAudioMediaIO):
     """AudioMediaIO implementation using FFmpeg for audio decoding."""
-    
+
     def load_bytes(self, data: bytes) -> tuple[np.ndarray, int]:
         return _ffmpeg_load_bytes(data)
-    
+
     def load_base64(self, media_type: str, data: str) -> tuple[np.ndarray, int]:
         return _ffmpeg_load_bytes(base64.b64decode(data))
-    
+
     def load_file(self, filepath) -> tuple[np.ndarray, int]:
         return _ffmpeg_load_file(filepath)
 
-# Replace globally
-try:
-    # For new vLLM versions
-    import vllm.multimodal.media.audio as _vllm_audio_module
-    _vllm_audio_module.AudioMediaIO = _PatchedAudioMediaIO
-except ImportError:
-    # For old vLLM versions
-    import vllm.multimodal.audio as _vllm_audio_module
-    _vllm_audio_module.AudioMediaIO = _PatchedAudioMediaIO
 
-# Also patch in utils module where it's imported
+# Replace globally in vLLM modules
+import vllm.multimodal.media.audio as _vllm_audio_module
+
+_vllm_audio_module.AudioMediaIO = _PatchedAudioMediaIO
+
 try:
     import vllm.multimodal.utils as _vllm_utils_module
+
     _vllm_utils_module.AudioMediaIO = _PatchedAudioMediaIO
 except (ImportError, AttributeError):
-    # AudioMediaIO might not be imported in utils in newer versions
     pass
 
+# ============================================================================
+# vLLM 0.18.0 Imports
 # ============================================================================
 
 from transformers import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
+
 from vllm.config import VllmConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.parse import MultiModalDataParser
-from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP, MultiModalEmbeddings
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
-    init_vllm_registered_model,
-    maybe_prefix,
     AutoWeightsLoader,
     WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    BaseDummyInputsBuilder,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-try:
-    # Try new location (vLLM >= 0.6.x)
-    from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs
-except ImportError:
-    # Fall back to old location (vLLM < 0.6.x)
-    try:
-        from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-    except ImportError:
-        # If neither location works, try individual imports
-        from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
-        from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.sequence import IntermediateTensors
 
 # Import VibeVoice components
-from vibevoice.modular.modular_vibevoice_tokenizer import (
-    VibeVoiceAcousticTokenizerModel,
-    VibeVoiceSemanticTokenizerModel,
-    VibeVoiceTokenizerStreamingCache,
-    VibeVoiceTokenizerEncoderOutput,
-)
 from vibevoice.modular.configuration_vibevoice import (
     VibeVoiceAcousticTokenizerConfig,
     VibeVoiceSemanticTokenizerConfig,
+)
+from vibevoice.modular.modular_vibevoice_tokenizer import (
+    VibeVoiceAcousticTokenizerModel,
+    VibeVoiceSemanticTokenizerModel,
+    VibeVoiceTokenizerEncoderOutput,
+    VibeVoiceTokenizerStreamingCache,
 )
 
 
@@ -558,6 +553,17 @@ class VibeVoiceProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        """Override to use the correct target sample rate (24kHz).
+
+        The default ``MultiModalDataParser`` uses 16kHz (Whisper default),
+        but VibeVoice operates on 24kHz waveforms.
+        """
+        return MultiModalDataParser(
+            target_sr=24000,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
@@ -644,10 +650,10 @@ class VibeVoiceDummyInputsBuilder(BaseDummyInputsBuilder[VibeVoiceProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, Any] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> Dict[str, Any]:
         """Generate dummy audio data for profiling.
-        
+
         The audio length is derived from ``seq_len`` so that profiling
         accurately measures memory for the longest audio the model can handle.
         Supports ``AudioDummyOptions.length`` override for faster startup.
@@ -665,17 +671,9 @@ class VibeVoiceDummyInputsBuilder(BaseDummyInputsBuilder[VibeVoiceProcessingInfo
             )
         }
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, Any] | None = None,
-    ) -> ProcessorInputs:
-        """Build ProcessorInputs for dummy profiling."""
-        return ProcessorInputs(
-            prompt=self.get_dummy_text(mm_counts),
-            mm_data=self.get_dummy_mm_data(seq_len, mm_counts, mm_options),
-        )
+    # NOTE: get_dummy_processor_inputs is intentionally NOT overridden.
+    # In vLLM >= 0.18.0, the base class provides a default implementation
+    # that calls get_dummy_text() + get_dummy_mm_data() + parse_mm_data().
 
 
 def _vibevoice_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -704,16 +702,10 @@ def _vibevoice_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 class VibeVoiceMultiModalProcessor(BaseMultiModalProcessor[VibeVoiceProcessingInfo]):
     """
     Multimodal processor for VibeVoice.
-    
+
     Handles the conversion of raw audio inputs to model-ready features,
     and manages the prompt token replacement for audio placeholders.
     """
-    
-    def _get_data_parser(self) -> MultiModalDataParser:
-        """Create a data parser with the correct target sample rate (24kHz)."""
-        # VibeVoice requires 24kHz, not 16kHz (Whisper default)
-        target_sr = 24000
-        return MultiModalDataParser(target_sr=target_sr)
     
     def _call_hf_processor(
         self,
@@ -724,12 +716,12 @@ class VibeVoiceMultiModalProcessor(BaseMultiModalProcessor[VibeVoiceProcessingIn
     ) -> BatchFeature:
         """
         Process prompt and audio for vLLM multimodal pipeline.
-        
+
         We intentionally do NOT run a HF processor that would pre-expand
-        `<|AUDIO|>` inside this method. Instead we:
-        1) Tokenize the prompt as-is (so `<|AUDIO|>` stays a single token)
-        2) Store raw audio tensors for `embed_multimodal` to encode later
-        3) Let vLLM call `_get_prompt_updates` to expand the single `<|AUDIO|>`
+        ``<|AUDIO|>`` inside this method. Instead we:
+        1) Tokenize the prompt as-is (so ``<|AUDIO|>`` stays a single token)
+        2) Store raw audio tensors for ``embed_multimodal`` to encode later
+        3) Let vLLM call ``_get_prompt_updates`` to expand the single ``<|AUDIO|>``
            into the full ASR format: [speech_start] + N*[speech_pad] + [speech_end] + [\\n]
         """
         # Handle the case where 'audios' key is used (transformers deprecation)
@@ -737,29 +729,29 @@ class VibeVoiceMultiModalProcessor(BaseMultiModalProcessor[VibeVoiceProcessingIn
         audios = mm_data.pop("audios", None)
         if audios is not None and "audio" not in mm_data:
             mm_data["audio"] = audios
-        
+
         # Text-only input handling
         if not mm_data.get("audio"):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-        
+
         # Get raw audio data
         raw_audio_list = mm_data.get("audio")
         if isinstance(raw_audio_list, np.ndarray):
             raw_audio_list = [raw_audio_list]
         elif not isinstance(raw_audio_list, list):
             raw_audio_list = list(raw_audio_list)
-        
+
         # Tokenize prompt directly to preserve <|AUDIO|> as a single token
         # vLLM will expand it via _get_prompt_updates
         tokenizer = self.info.get_tokenizer()
         prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
         prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-        
+
         # Create result with input_ids
         result = BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-        
+
         # Add raw audio tensors for VibeVoice encoder
         # Stack into a single tensor for vLLM's batched field config
         max_len = max(len(a) for a in raw_audio_list)
@@ -771,7 +763,7 @@ class VibeVoiceMultiModalProcessor(BaseMultiModalProcessor[VibeVoiceProcessingIn
             if audio_len < max_len:
                 audio = np.pad(audio, (0, max_len - audio_len), mode='constant')
             raw_audio_tensors.append(torch.from_numpy(audio).float())
-        
+
         # Stack into [num_audios, max_len] tensor
         stacked_audio = torch.stack(raw_audio_tensors, dim=0)  # Shape: [num_audios, max_len]
         result["raw_audio"] = stacked_audio
@@ -789,12 +781,12 @@ class VibeVoiceMultiModalProcessor(BaseMultiModalProcessor[VibeVoiceProcessingIn
     def _hf_processor_applies_updates(
         self,
         prompt_text: str,
-        mm_items,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         """Return whether the HF processor applies prompt updates.
-        
+
         Returns False because we handle token expansion via _get_prompt_updates.
         """
         return False
@@ -809,7 +801,7 @@ class VibeVoiceMultiModalProcessor(BaseMultiModalProcessor[VibeVoiceProcessingIn
 
     def _get_prompt_updates(
         self,
-        mm_items,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
@@ -953,18 +945,22 @@ class VibeVoiceForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
-        
+
         self.audio_encoder = VibeVoiceAudioEncoder(config)
-        
-        # Pass decoder_config to the language model initialization
+
+        # Pass decoder_config to the language model initialization.
+        # Use _mark_language_model context manager so that vLLM 0.18.0's
+        # SupportsMultiModal protocol can auto-detect the language model
+        # for embed_input_ids / get_language_model.
         decoder_config = getattr(config, "decoder_config", config)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=decoder_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
-        
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=decoder_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
+
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
@@ -987,7 +983,7 @@ class VibeVoiceForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         """
         Extract audio embeddings using VibeVoice's acoustic/semantic tokenizers.
         
@@ -1124,72 +1120,10 @@ class VibeVoiceForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         
         return tuple(embeddings)
 
-    def get_input_embeddings(self) -> torch.nn.Module:
-        """Return the text embedding layer (embed_tokens).
-        
-        vLLM uses this to get the embedding module for converting token IDs 
-        to embeddings during decode phase.
-        
-        Returns:
-            The embed_tokens module from the language model
-        """
-        # Get embed_tokens from the language model
-        if hasattr(self.language_model, 'model') and hasattr(self.language_model.model, 'embed_tokens'):
-            return self.language_model.model.embed_tokens
-        elif hasattr(self.language_model, 'embed_tokens'):
-            return self.language_model.embed_tokens
-        else:
-            # Try to get from inner model
-            inner = self.language_model
-            if hasattr(inner, 'language_model'):
-                inner = inner.language_model
-            if hasattr(inner, 'model') and hasattr(inner.model, 'embed_tokens'):
-                return inner.model.embed_tokens
-        
-        raise AttributeError("Cannot find embed_tokens layer")
-    
-    def embed_input_ids(
-        self, 
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
-        is_multimodal: Optional[torch.Tensor] = None,
-        **kwargs,  # Accept any additional kwargs for compatibility
-    ) -> torch.Tensor:
-        """Apply token embeddings to input_ids and merge with multimodal embeddings.
-        
-        This is the preferred method in vLLM V1 for converting token IDs
-        to embeddings and merging multimodal (audio) embeddings.
-        
-        Args:
-            input_ids: Tensor of token IDs to embed
-            multimodal_embeddings: Pre-computed multimodal embeddings (audio).
-                                   Can be a Tensor or a List of Tensors (vLLM standard).
-            is_multimodal: Boolean mask indicating which positions are multimodal
-            **kwargs: Additional arguments for compatibility
-            
-        Returns:
-            Tensor of embeddings with multimodal content merged in
-        """
-        from vllm.model_executor.models.utils import _merge_multimodal_embeddings
-        
-        # Get text embeddings
-        embed_tokens = self.get_input_embeddings()
-        inputs_embeds = embed_tokens(input_ids)
-        
-        # Merge multimodal embeddings if provided
-        if multimodal_embeddings is not None and is_multimodal is not None:
-            # Use vLLM's standard merge function which handles List[Tensor] correctly
-            inputs_embeds = _merge_multimodal_embeddings(
-                inputs_embeds,
-                multimodal_embeddings,
-                is_multimodal,
-            )
-        
-        return inputs_embeds
-
-    def get_language_model(self) -> torch.nn.Module:
-        """Return the language model backbone."""
-        return self.language_model
+    # NOTE: In vLLM >= 0.18.0, get_input_embeddings(), embed_input_ids(),
+    # and get_language_model() are provided by the SupportsMultiModal protocol.
+    # The protocol auto-detects the language model via _mark_language_model()
+    # which was called in __init__.
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> set[str]:
         """Load model weights from checkpoint.
