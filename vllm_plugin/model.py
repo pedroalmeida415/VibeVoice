@@ -356,8 +356,10 @@ class VibeVoiceAudioEncoder(nn.Module):
         if use_sample is None:
             use_sample = self.use_sample
 
-        # Keep encoding in inference mode to avoid autograd build-up
-        with torch.no_grad():
+        # Keep encoding in inference mode to avoid autograd build-up.
+        # inference_mode() is ~5-10% faster than no_grad() because it also
+        # disables view tracking and version counter bumps on every tensor op.
+        with torch.inference_mode():
             if not use_streaming:
                 acoustic_input = audio.unsqueeze(1)
                 acoustic_out = self.acoustic_tokenizer.encode(acoustic_input)
